@@ -9,11 +9,9 @@ int main() {
     string scheme_choice;
     int dataset_type;
 
-    // User selects dataset type
     cout << "Select Dataset Type: \n1. Floating-point Threat Scores \n2. Integer-based Threat Counts\n";
     cin >> dataset_type;
 
-    // Automatic scheme selection
     if (dataset_type == 1) {
         scheme_choice = "CKKS";
     } else if (dataset_type == 2) {
@@ -25,7 +23,6 @@ int main() {
 
     cout << "Selected Encryption Scheme: " << scheme_choice << endl;
 
-    // Initialize CryptoContext
     CryptoContext<DCRTPoly> cc;
     if (scheme_choice == "CKKS") {
         CCParams<CryptoContextCKKSRNS> parameters;

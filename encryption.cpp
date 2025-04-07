@@ -1,83 +1,72 @@
+#include "openfhe.h"
 #include <iostream>
 #include <vector>
-#include <curl/curl.h>
-#include <nlohmann/json.hpp>
-#include "openfhe.h"
+#include <cmath>
+#include <chrono>
 
 using namespace lbcrypto;
-using json = nlohmann::json;
-
-// Callback function for libcurl
-size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output) {
-    size_t totalSize = size * nmemb;
-    output->append((char*)contents, totalSize);
-    return totalSize;
-}
-
-// Function to fetch data from API
-json fetchDataFromAPI(const std::string& api_url) {
-    CURL* curl = curl_easy_init();
-    std::string response;
-
-    if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, api_url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
-    }
-    return json::parse(response);
-}
 
 int main() {
-    std::string api_url = "http://127.0.0.1:5000/data";
+    // Setup
+    CCParams<CryptoContextCKKSRNS> params;
+    params.SetMultiplicativeDepth(3);
+    params.SetScalingModSize(50);
+    params.SetBatchSize(8192); // Ensures we can fit 8192 doubles per ciphertext
+    CryptoContext<DCRTPoly> cc = GenCryptoContext(params);
 
-    // Step 1: Fetch Data from Flask API
-    json threatData = fetchDataFromAPI(api_url);
-    std::cout << "Fetched Threat Data: " << threatData.dump(4) << std::endl;
+    cc->Enable(PKESchemeFeature::PKE);
+    cc->Enable(PKESchemeFeature::KEYSWITCH);
+    cc->Enable(PKESchemeFeature::LEVELEDSHE); // Needed for EvalMult
+    cc->Enable(PKESchemeFeature::ADVANCEDSHE);
 
-    // Step 2: Initialize OpenFHE CKKS Context
-    CCParams<CryptoContextCKKSRNS> parameters;
-    parameters.SetMultiplicativeDepth(4);
-    parameters.SetScalingModSize(50);
-    parameters.SetRingDim(8192);
+    auto keys = cc->KeyGen();
+    cc->EvalMultKeyGen(keys.secretKey);
 
-    CryptoContext<DCRTPoly> cryptoContext = GenCryptoContext(parameters);
+    // Simulate 1 million threat scores
+    size_t NUM_RECORDS = 1000000;
+    std::vector<double> severityScores(NUM_RECORDS, 0.75); // Dummy values for now
 
-    cryptoContext->Enable(PKE);  // Enable Public Key Encryption
-    cryptoContext->Enable(FHE);  // Enable Fully Homomorphic Encryption
+    std::vector<Ciphertext<DCRTPoly>> encryptedChunks;
+    size_t batchSize = cc->GetRingDimension() / 2;
 
-    // Step 3: Generate Key Pair
-    auto keyPair = cryptoContext->KeyGen();
-    cryptoContext->EvalMultKeyGen(keyPair.secretKey);
+    std::cout << "Encrypting in chunks of " << batchSize << "..." << std::endl;
 
-    // Step 4: Encrypt Threat Data (Severity Scores)
-    std::vector<double> severityScores;
-    for (const auto& entry : threatData) {
-        severityScores.push_back(entry["severity"]);
+    auto startEnc = std::chrono::high_resolution_clock::now();
+
+    for (size_t i = 0; i < NUM_RECORDS; i += batchSize) {
+        std::vector<double> chunk(
+            severityScores.begin() + i,
+            severityScores.begin() + std::min(i + batchSize, severityScores.size())
+        );
+
+        Plaintext pt = cc->MakeCKKSPackedPlaintext(chunk);
+        auto enc = cc->Encrypt(keys.publicKey, pt);
+        encryptedChunks.push_back(enc);
     }
 
-    Plaintext plaintext = cryptoContext->MakeCKKSPackedPlaintext(severityScores);
-    Ciphertext<DCRTPoly> encryptedData = cryptoContext->Encrypt(keyPair.publicKey, plaintext);
+    auto endEnc = std::chrono::high_resolution_clock::now();
+    std::cout << "Encryption time: "
+              << std::chrono::duration<double>(endEnc - startEnc).count() << " s\n";
 
-    std::cout << "Data Encrypted Successfully!" << std::endl;
-
-    // Step 5: Perform Homomorphic Computations (Compute Average Severity)
-    Ciphertext<DCRTPoly> encryptedSum = encryptedData;
-    for (size_t i = 1; i < severityScores.size(); i++) {
-        encryptedSum = cryptoContext->EvalAdd(encryptedSum, encryptedData);
+    // Sum all encrypted chunks
+    std::cout << "Aggregating encrypted chunks...\n";
+    auto encSum = encryptedChunks[0];
+    for (size_t i = 1; i < encryptedChunks.size(); ++i) {
+        encSum = cc->EvalAdd(encSum, encryptedChunks[i]);
     }
 
-    std::vector<double> scalingFactor = {1.0 / severityScores.size()};
-    Plaintext scalar = cryptoContext->MakeCKKSPackedPlaintext(scalingFactor);
-    Ciphertext<DCRTPoly> encryptedMean = cryptoContext->EvalMult(encryptedSum, scalar);
+    // Compute encrypted mean
+    double invN = 1.0 / NUM_RECORDS;
+    std::vector<double> scaleVec = {invN};
+    auto scalar = cc->MakeCKKSPackedPlaintext(scaleVec);
+    auto encMean = cc->EvalMult(encSum, scalar);
 
-    // Step 6: Decrypt & Display Result
-    Plaintext decryptedMean;
-    cryptoContext->Decrypt(keyPair.secretKey, encryptedMean, &decryptedMean);
-    decryptedMean->SetLength(1);
+    // Decrypt result
+    Plaintext result;
+    cc->Decrypt(keys.secretKey, encMean, &result);
+    result->SetLength(1);
 
-    std::cout << "Decrypted Mean Severity Score: " << decryptedMean->GetCKKSPackedValue()[0] << std::endl;
+    std::cout << "Decrypted Mean Severity: " << result->GetCKKSPackedValue()[0] << std::endl;
 
     return 0;
 }

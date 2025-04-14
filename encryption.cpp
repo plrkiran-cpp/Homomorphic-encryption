@@ -7,7 +7,6 @@
 using namespace lbcrypto;
 
 int main() {
-    // Set encryption parameters
     CCParams<CryptoContextCKKSRNS> params;
     params.SetMultiplicativeDepth(2);
     params.SetScalingModSize(50);
@@ -17,7 +16,6 @@ int main() {
     cc->Enable(PKESchemeFeature::PKE);
     cc->Enable(PKESchemeFeature::LEVELEDSHE);
 
-    // Generate keys
     auto keyPair = cc->KeyGen();
     cc->EvalMultKeyGen(keyPair.secretKey);
 
@@ -54,7 +52,6 @@ int main() {
               << std::chrono::duration<double>(encEnd - encStart).count()
               << " s\n";
 
-    // Aggregate all chunks
     std::cout << "Aggregating encrypted chunks...\n";
     auto totalCT = encryptedChunks[0];
     for (size_t i = 1; i < encryptedChunks.size(); ++i) {
